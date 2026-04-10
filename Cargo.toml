@@ -1,0 +1,56 @@
+[package]
+name = "blackduck-tui"
+version = "0.1.0"
+edition = "2021"
+description = "TUI for Black Duck SCA - browse projects, components, vulnerabilities"
+authors = []
+
+[[bin]]
+name = "blackduck-tui"
+path = "src/main.rs"
+
+[lints.rust]
+future-incompatible = "warn"
+nonstandard-style = "deny"
+unused = { level = "warn", priority = -1 }
+
+[lints.clippy]
+all = { level = "deny", priority = 10 }
+pedantic = { level = "warn", priority = 3 }
+# These pedantic lints fire a lot in TUI code legitimately
+module-name-repetitions = "allow"
+missing-errors-doc = "allow"
+missing-panics-doc = "allow"
+wildcard-imports = "allow"
+
+[dependencies]
+# TUI
+ratatui = "0.30"
+crossterm = "0.29"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP client
+reqwest = { version = "0.13", features = [
+  "json",
+  "rustls",
+], default-features = false }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Config file
+config = { version = "0.15", features = ["toml"] }
+toml = "0.8"
+
+anyhow = "1"
+thiserror = "2"
+
+# Utilities
+dirs = "6"
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
