@@ -6,7 +6,7 @@ use ratatui::{
     Frame,
 };
 
-use crate::app::{App, Focus, Screen, VersionTab};
+use crate::app::{App, FilterField, Focus, Screen, VersionTab};
 
 pub mod colors {
     use ratatui::style::Color;
@@ -176,7 +176,16 @@ fn render_project_list(f: &mut Frame, app: &App, area: Rect) {
         Style::default().fg(Color::White)
     };
 
-    let title = format!(" Projects ({}) ", app.projects.items.len());
+    let page_size = app.config.tui.page_size;
+    let shown_from = app.projects_offset + 1;
+    let shown_to =
+        app.projects_offset + u32::try_from(app.projects.items.len()).unwrap_or(u32::MAX);
+    let pagination = if app.projects_total > u64::from(page_size) {
+        format!("{shown_from}\u{2013}{shown_to}/{}", app.projects_total)
+    } else {
+        format!("{}", app.projects.items.len())
+    };
+    let title = format!(" Projects ({pagination}) ");
 
     let block = Block::default()
         .title(title)
@@ -348,7 +357,16 @@ fn render_version_list(f: &mut Frame, app: &App, area: Rect) {
         .as_ref()
         .map_or("Project", |p| p.name.as_str());
 
-    let title = format!(" {} - Versions ({}) ", proj_name, app.versions.items.len());
+    let page_size = app.config.tui.page_size;
+    let shown_from = app.versions_offset + 1;
+    let shown_to =
+        app.versions_offset + u32::try_from(app.versions.items.len()).unwrap_or(u32::MAX);
+    let pagination = if app.versions_total > u64::from(page_size) {
+        format!("{shown_from}\u{2013}{shown_to}/{}", app.versions_total)
+    } else {
+        format!("{}", app.versions.items.len())
+    };
+    let title = format!(" {proj_name} - Versions ({pagination}) ");
 
     let block = Block::default()
         .title(title)
@@ -505,6 +523,11 @@ fn render_version_detail(f: &mut Frame, app: &App, area: Rect) {
     }
 
     render_status_bar(f, app, chunks[2]);
+
+    // Filter popup overlay (rendered last so it appears on top)
+    if app.filter_popup.open {
+        render_filter_popup(f, app, area);
+    }
 }
 
 fn render_tab_header<'a>(app: &App) -> Tabs<'a> {
@@ -541,10 +564,24 @@ fn render_components_list(f: &mut Frame, app: &App, area: Rect) {
         .selected_version
         .as_ref()
         .map_or("Version", |v| v.version_name.as_str());
+
+    let filter_badge = if app.filter.active_count() > 0 {
+        format!(" [{} filters]", app.filter.active_count())
+    } else {
+        String::new()
+    };
+    let page_size = app.config.tui.page_size;
+    let shown_from = app.components_offset + 1;
+    let shown_to =
+        app.components_offset + u32::try_from(app.components.items.len()).unwrap_or(u32::MAX);
+    let pagination = if app.components_total > u64::from(page_size) {
+        format!("{shown_from}\u{2013}{shown_to}/{}", app.components_total)
+    } else {
+        format!("{}", app.components.items.len())
+    };
     let title = format!(
-        " {} - Components ({}) ",
-        ver_name,
-        app.components.items.len()
+        " {ver_name} - Components ({}) {filter_badge}",
+        pagination.trim(),
     );
 
     // Split for tabs + list
@@ -617,11 +654,19 @@ fn render_vulnerabilities_list(f: &mut Frame, app: &App, area: Rect) {
         .selected_version
         .as_ref()
         .map_or("Version", |v| v.version_name.as_str());
-    let title = format!(
-        " {} - Vulnerabilities ({}) ",
-        ver_name,
-        app.vulnerabilities.items.len()
-    );
+    let page_size = app.config.tui.page_size;
+    let shown_from = app.vulnerabilities_offset + 1;
+    let shown_to = app.vulnerabilities_offset
+        + u32::try_from(app.vulnerabilities.items.len()).unwrap_or(u32::MAX);
+    let pagination = if app.vulnerabilities_total > u64::from(page_size) {
+        format!(
+            "{shown_from}\u{2013}{shown_to}/{}",
+            app.vulnerabilities_total
+        )
+    } else {
+        format!("{}", app.vulnerabilities.items.len())
+    };
+    let title = format!(" {ver_name} - Vulnerabilities ({pagination}) ");
 
     let inner = Layout::default()
         .direction(Direction::Vertical)
@@ -703,11 +748,28 @@ fn render_policy_list(f: &mut Frame, app: &App, area: Rect) {
         .selected_version
         .as_ref()
         .map_or("Version", |v| v.version_name.as_str());
-    let title = format!(
-        " {} - Policy Violations ({}) ",
-        ver_name,
-        app.policy_violations.items.len()
-    );
+
+    // Policy violations only uses review/approval filter badge (not policy_status or rule_names)
+    let pv_filter_count = usize::from(!app.filter.review_statuses.is_empty())
+        + usize::from(!app.filter.approval_statuses.is_empty());
+    let filter_badge = if pv_filter_count > 0 {
+        format!(" [{pv_filter_count} filters]")
+    } else {
+        String::new()
+    };
+    let page_size = app.config.tui.page_size;
+    let shown_from = app.policy_violations_offset + 1;
+    let shown_to = app.policy_violations_offset
+        + u32::try_from(app.policy_violations.items.len()).unwrap_or(u32::MAX);
+    let pagination = if app.policy_violations_total > u64::from(page_size) {
+        format!(
+            "{shown_from}\u{2013}{shown_to}/{}",
+            app.policy_violations_total
+        )
+    } else {
+        format!("{}", app.policy_violations.items.len())
+    };
+    let title = format!(" {ver_name} - Policy Violations ({pagination}){filter_badge} ");
 
     let inner = Layout::default()
         .direction(Direction::Vertical)
@@ -1179,10 +1241,12 @@ fn render_status_bar(f: &mut Frame, app: &App, area: Rect) {
 
     let right_hint = match app.screen {
         Screen::Login => "",
-        Screen::Projects => "j/k:move  Enter:open  /:search  r:refresh  Tab:switch  q:quit",
-        Screen::Versions => "j/k:move  Enter:open  Backspace:back  /:search  q:quit",
+        Screen::Projects => {
+            "j/k:move  Enter:open  n/p:page  /:search  r:refresh  Tab:switch  q:quit"
+        }
+        Screen::Versions => "j/k:move  Enter:open  n/p:page  Backspace:back  /:search  q:quit",
         Screen::Components | Screen::Vulnerabilities | Screen::PolicyViolations => {
-            "j/k:move  Tab:tab  Backspace:back  /:search  Tab:focus  q:quit"
+            "j/k:move  Tab:tab  f:filter  n/p:page  Backspace:back  /:search  q:quit"
         }
     };
 
@@ -1239,6 +1303,172 @@ fn build_breadcrumb(app: &App) -> String {
         _ => {}
     }
     parts.join(" > ")
+}
+
+// ---------------------------------------------------------------------------
+// Filter popup overlay
+// ---------------------------------------------------------------------------
+
+fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+    let x = area.x + area.width.saturating_sub(width) / 2;
+    let y = area.y + area.height.saturating_sub(height) / 2;
+    Rect {
+        x,
+        y,
+        width: width.min(area.width),
+        height: height.min(area.height),
+    }
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "filter popup renders 4 sections with checkboxes and dynamic content"
+)]
+fn render_filter_popup(f: &mut Frame, app: &App, area: Rect) {
+    // Collect all option rows across all 4 sections to compute total height
+    let policy_opts = FilterField::PolicyStatus.options();
+    let review_opts = FilterField::ReviewStatus.options();
+    let approval_opts = FilterField::ApprovalStatus.options();
+    let rule_opts: Vec<&str> = app
+        .available_policy_rules
+        .iter()
+        .map(|(name, _id)| name.as_str())
+        .collect();
+
+    // For PolicyRuleName, create a list of selected display names based on selected IDs
+    let selected_rule_names: Vec<String> = app
+        .filter
+        .rule_ids
+        .iter()
+        .filter_map(|id| {
+            app.available_policy_rules
+                .iter()
+                .find(|(_, rule_id)| rule_id == id)
+                .map(|(name, _)| name.clone())
+        })
+        .collect();
+
+    // Height: title border (2) + 4 section headers + their options + spacing between sections
+    let to_u16 = |n: usize| u16::try_from(n).unwrap_or(u16::MAX);
+    let content_rows: u16 = 1 // title padding
+        + 1 + to_u16(policy_opts.len())     // Policy Status header + opts
+        + 1                                  // blank separator
+        + 1 + to_u16(review_opts.len())     // Review Status
+        + 1
+        + 1 + to_u16(approval_opts.len())   // Approval Status
+        + 1
+        + 1 + (if rule_opts.is_empty() { 1 } else { to_u16(rule_opts.len()) }) // Policy Rule Name
+        + 1; // footer spacing
+
+    let popup_height = content_rows + 2; // +2 for border
+    let popup_width: u16 = 54;
+
+    let popup_area = centered_rect(popup_width, popup_height, area);
+
+    f.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .title(" Filters  j/k:field  Tab:option  Space:toggle  c:clear  Esc:close ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(colors::PRIMARY));
+    f.render_widget(block, popup_area);
+
+    // Inner area for content
+    let inner = Rect {
+        x: popup_area.x + 1,
+        y: popup_area.y + 1,
+        width: popup_area.width.saturating_sub(2),
+        height: popup_area.height.saturating_sub(2),
+    };
+
+    let current_field = app.filter_popup.current_field();
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Helper closure: render one section
+    let render_section = |lines: &mut Vec<Line>,
+                          field: FilterField,
+                          opts: &[&str],
+                          selected_set: &[String],
+                          focused_option: usize,
+                          is_focused_field: bool| {
+        let label_style = if is_focused_field {
+            Style::default()
+                .fg(colors::PRIMARY)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(colors::SECONDARY)
+                .add_modifier(Modifier::BOLD)
+        };
+        lines.push(Line::styled(format!("  {}:", field.label()), label_style));
+        if opts.is_empty() {
+            lines.push(Line::styled(
+                "    (loading...)",
+                Style::default().fg(colors::MUTED),
+            ));
+        } else {
+            for (i, opt) in opts.iter().enumerate() {
+                let checked = selected_set.iter().any(|s| s == opt);
+                let checkbox = if checked { "[✓]" } else { "[ ]" };
+                let is_highlighted = is_focused_field && i == focused_option;
+                let opt_style = if is_highlighted {
+                    Style::default()
+                        .bg(colors::SELECTED_BG)
+                        .fg(colors::PRIMARY)
+                        .add_modifier(Modifier::BOLD)
+                } else if checked {
+                    Style::default().fg(colors::SUCCESS)
+                } else {
+                    Style::default().fg(Color::White)
+                };
+                lines.push(Line::styled(format!("    {checkbox} {opt}"), opt_style));
+            }
+        }
+    };
+
+    render_section(
+        &mut lines,
+        FilterField::PolicyStatus,
+        policy_opts,
+        &app.filter.policy_statuses,
+        app.filter_popup.focused_option,
+        current_field == FilterField::PolicyStatus,
+    );
+    lines.push(Line::raw(""));
+
+    render_section(
+        &mut lines,
+        FilterField::ReviewStatus,
+        review_opts,
+        &app.filter.review_statuses,
+        app.filter_popup.focused_option,
+        current_field == FilterField::ReviewStatus,
+    );
+    lines.push(Line::raw(""));
+
+    render_section(
+        &mut lines,
+        FilterField::ApprovalStatus,
+        approval_opts,
+        &app.filter.approval_statuses,
+        app.filter_popup.focused_option,
+        current_field == FilterField::ApprovalStatus,
+    );
+    lines.push(Line::raw(""));
+
+    // PolicyRuleName — dynamic options
+    render_section(
+        &mut lines,
+        FilterField::PolicyRuleName,
+        &rule_opts,
+        &selected_rule_names,
+        app.filter_popup.focused_option,
+        current_field == FilterField::PolicyRuleName,
+    );
+
+    let para = Paragraph::new(lines).wrap(Wrap { trim: false });
+    f.render_widget(para, inner);
 }
 
 // ---------------------------------------------------------------------------

@@ -59,32 +59,32 @@ impl VersionTab {
 
 /// Which field is being edited in the filter popup
 #[derive(Debug, Clone, PartialEq, Copy)]
-#[expect(
-    clippy::enum_variant_names,
-    reason = "Status suffix is intentional: these are distinct status filter fields"
-)]
 pub enum FilterField {
     PolicyStatus,
     ReviewStatus,
     ApprovalStatus,
+    PolicyRuleName,
 }
 
 impl FilterField {
-    pub const ALL: [Self; 3] = [Self::PolicyStatus, Self::ReviewStatus, Self::ApprovalStatus];
+    pub const ALL: [Self; 4] = [
+        Self::PolicyStatus,
+        Self::ReviewStatus,
+        Self::ApprovalStatus,
+        Self::PolicyRuleName,
+    ];
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "used by filter popup UI (not yet wired)")
-    )]
     pub fn label(self) -> &'static str {
         match self {
             Self::PolicyStatus => "Policy Status",
             Self::ReviewStatus => "Review Status",
             Self::ApprovalStatus => "Approval Status",
+            Self::PolicyRuleName => "Policy Rule Name",
         }
     }
 
-    /// Known option values for each filter field (shown in popup).
+    /// Known static option values for each filter field.
+    /// `PolicyRuleName` returns an empty slice — options are populated dynamically from the API.
     pub fn options(self) -> &'static [&'static str] {
         match self {
             Self::PolicyStatus => &[
@@ -94,6 +94,7 @@ impl FilterField {
             ],
             Self::ReviewStatus => &["UNREVIEWED", "REVIEWED", "DYNAMIC", "MANUAL"],
             Self::ApprovalStatus => &["APPROVED", "REJECTED", "PENDING"],
+            Self::PolicyRuleName => &[],
         }
     }
 
@@ -105,7 +106,8 @@ impl FilterField {
         match self {
             Self::PolicyStatus => Self::ReviewStatus,
             Self::ReviewStatus => Self::ApprovalStatus,
-            Self::ApprovalStatus => Self::PolicyStatus,
+            Self::ApprovalStatus => Self::PolicyRuleName,
+            Self::PolicyRuleName => Self::PolicyStatus,
         }
     }
 
@@ -115,19 +117,16 @@ impl FilterField {
     )]
     pub fn prev(self) -> Self {
         match self {
-            Self::PolicyStatus => Self::ApprovalStatus,
+            Self::PolicyStatus => Self::PolicyRuleName,
             Self::ReviewStatus => Self::PolicyStatus,
             Self::ApprovalStatus => Self::ReviewStatus,
+            Self::PolicyRuleName => Self::ApprovalStatus,
         }
     }
 }
 
 /// Active filter values applied to component lists
 #[derive(Debug, Clone, Default)]
-#[expect(
-    clippy::struct_field_names,
-    reason = "statuses suffix is intentional: each field holds a distinct filter set"
-)]
 pub struct ComponentFilter {
     /// If non-empty, only components whose `policy_status` is in this set are shown.
     pub policy_statuses: Vec<String>,
@@ -135,6 +134,9 @@ pub struct ComponentFilter {
     pub review_statuses: Vec<String>,
     /// If non-empty, only components whose `approval_status` is in this set are shown.
     pub approval_statuses: Vec<String>,
+    /// If non-empty, filter by policy rule IDs (for server-side filtering).
+    /// This is sent to the API as `filter=policyRuleViolation:ID`.
+    pub rule_ids: Vec<String>,
 }
 
 impl ComponentFilter {
@@ -146,24 +148,18 @@ impl ComponentFilter {
         self.policy_statuses.is_empty()
             && self.review_statuses.is_empty()
             && self.approval_statuses.is_empty()
+            && self.rule_ids.is_empty()
     }
 
     /// Number of active filter criteria (for badge display).
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "used by filter badge in UI (not yet wired)")
-    )]
     pub fn active_count(&self) -> usize {
         usize::from(!self.policy_statuses.is_empty())
             + usize::from(!self.review_statuses.is_empty())
             + usize::from(!self.approval_statuses.is_empty())
+            + usize::from(!self.rule_ids.is_empty())
     }
 
     /// Toggle a value in a filter set (add if absent, remove if present).
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "used by filter popup UI (not yet wired)")
-    )]
     pub fn toggle(set: &mut Vec<String>, value: &str) {
         if let Some(pos) = set.iter().position(|v| v == value) {
             set.remove(pos);
@@ -172,7 +168,30 @@ impl ComponentFilter {
         }
     }
 
+    /// Build Black Duck API `filter=` query params from the active filter state.
+    ///
+    /// Returns a list of `("filter", "fieldName:VALUE")` pairs suitable for
+    /// appending to a request URL, including policy rule violation IDs.
+    pub fn to_api_params(&self) -> Vec<(&'static str, String)> {
+        let mut params: Vec<(&'static str, String)> = Vec::new();
+        for s in &self.policy_statuses {
+            params.push(("filter", format!("policyStatus:{s}")));
+        }
+        for s in &self.review_statuses {
+            params.push(("filter", format!("reviewStatus:{s}")));
+        }
+        for s in &self.approval_statuses {
+            params.push(("filter", format!("approvalStatus:{s}")));
+        }
+        for id in &self.rule_ids {
+            // The ID already has "PR~" prefix from the /components-filters API
+            params.push(("filter", format!("policyRuleViolation:{id}")));
+        }
+        params
+    }
+
     /// Returns true if `component` passes all active filters.
+    /// Note: `rule_ids` filtering is done server-side via API, so not checked here.
     pub fn matches(&self, c: &BomComponent) -> bool {
         if !self.policy_statuses.is_empty() {
             let status = c.policy_status.as_deref().unwrap_or("");
@@ -198,10 +217,6 @@ impl ComponentFilter {
 
 /// State for the filter popup overlay
 #[derive(Debug, Clone, Default)]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used by filter popup UI (not yet wired)")
-)]
 pub struct FilterPopup {
     pub open: bool,
     /// Which filter field row is currently highlighted
@@ -215,41 +230,29 @@ impl FilterPopup {
         FilterField::ALL[self.focused_field % FilterField::ALL.len()]
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "used by filter popup UI (not yet wired)")
-    )]
     pub fn move_field_down(&mut self) {
         self.focused_field = (self.focused_field + 1) % FilterField::ALL.len();
         self.focused_option = 0;
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "used by filter popup UI (not yet wired)")
-    )]
     pub fn move_field_up(&mut self) {
         self.focused_field =
             (self.focused_field + FilterField::ALL.len() - 1) % FilterField::ALL.len();
         self.focused_option = 0;
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "used by filter popup UI (not yet wired)")
-    )]
-    pub fn move_option_down(&mut self) {
-        let opts = self.current_field().options().len();
-        self.focused_option = (self.focused_option + 1) % opts;
+    pub fn move_option_down(&mut self, options_count: usize) {
+        if options_count == 0 {
+            return;
+        }
+        self.focused_option = (self.focused_option + 1) % options_count;
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "used by filter popup UI (not yet wired)")
-    )]
-    pub fn move_option_up(&mut self) {
-        let opts = self.current_field().options().len();
-        self.focused_option = (self.focused_option + opts - 1) % opts;
+    pub fn move_option_up(&mut self, options_count: usize) {
+        if options_count == 0 {
+            return;
+        }
+        self.focused_option = (self.focused_option + options_count - 1) % options_count;
     }
 }
 
@@ -260,11 +263,34 @@ impl FilterPopup {
 /// Async messages sent from background tasks to the main loop
 #[derive(Debug)]
 pub enum AppEvent {
-    ProjectsLoaded(Vec<Project>),
-    VersionsLoaded(Vec<ProjectVersion>),
-    ComponentsLoaded(Vec<BomComponent>),
-    VulnerabilitiesLoaded(Vec<Vulnerability>),
-    PolicyViolationsLoaded(Vec<BomComponent>),
+    ProjectsLoaded {
+        items: Vec<Project>,
+        total: u64,
+        offset: u32,
+    },
+    VersionsLoaded {
+        items: Vec<ProjectVersion>,
+        total: u64,
+        offset: u32,
+    },
+    ComponentsLoaded {
+        items: Vec<BomComponent>,
+        total: u64,
+        offset: u32,
+    },
+    VulnerabilitiesLoaded {
+        items: Vec<Vulnerability>,
+        total: u64,
+        offset: u32,
+    },
+    PolicyViolationsLoaded {
+        items: Vec<BomComponent>,
+        total: u64,
+        offset: u32,
+    },
+    /// Policy rules fetched for all in-violation components of the current version.
+    /// Each tuple contains (`display_name`, `rule_id`).
+    PolicyRulesLoaded(Vec<(String, String)>),
     AuthSuccess,
     Error(String),
 }
@@ -312,10 +338,20 @@ pub struct App {
 
     // Data lists
     pub projects: StatefulList<Project>,
+    pub projects_total: u64,
+    pub projects_offset: u32,
     pub versions: StatefulList<ProjectVersion>,
+    pub versions_total: u64,
+    pub versions_offset: u32,
     pub components: StatefulList<BomComponent>,
+    pub components_total: u64,
+    pub components_offset: u32,
     pub vulnerabilities: StatefulList<Vulnerability>,
+    pub vulnerabilities_total: u64,
+    pub vulnerabilities_offset: u32,
     pub policy_violations: StatefulList<BomComponent>,
+    pub policy_violations_total: u64,
+    pub policy_violations_offset: u32,
 
     // Currently selected parent context
     pub selected_project: Option<Project>,
@@ -339,6 +375,10 @@ pub struct App {
     // Filter popup
     pub filter: ComponentFilter,
     pub filter_popup: FilterPopup,
+    /// Deduplicated list of violated policy rules available for filtering.
+    /// Each tuple contains (`display_name`, `rule_id`).
+    /// Populated when the filter popup is opened (fetched from API on demand).
+    pub available_policy_rules: Vec<(String, String)>,
 }
 
 impl App {
@@ -366,10 +406,20 @@ impl App {
             login_error: None,
 
             projects: StatefulList::default(),
+            projects_total: 0,
+            projects_offset: 0,
             versions: StatefulList::default(),
+            versions_total: 0,
+            versions_offset: 0,
             components: StatefulList::default(),
+            components_total: 0,
+            components_offset: 0,
             vulnerabilities: StatefulList::default(),
+            vulnerabilities_total: 0,
+            vulnerabilities_offset: 0,
             policy_violations: StatefulList::default(),
+            policy_violations_total: 0,
+            policy_violations_offset: 0,
 
             selected_project: None,
             selected_version: None,
@@ -387,6 +437,7 @@ impl App {
 
             filter: ComponentFilter::default(),
             filter_popup: FilterPopup::default(),
+            available_policy_rules: Vec::new(),
         }
     }
 
@@ -414,20 +465,63 @@ impl App {
                 self.screen = Screen::Projects;
                 self.selected_project = None;
                 self.versions = StatefulList::default();
+                self.versions_total = 0;
+                self.versions_offset = 0;
                 self.focus = Focus::Left;
             }
             Screen::Components | Screen::Vulnerabilities | Screen::PolicyViolations => {
                 self.screen = Screen::Versions;
                 self.selected_version = None;
                 self.components = StatefulList::default();
+                self.components_total = 0;
+                self.components_offset = 0;
                 self.vulnerabilities = StatefulList::default();
+                self.vulnerabilities_total = 0;
+                self.vulnerabilities_offset = 0;
                 self.policy_violations = StatefulList::default();
+                self.policy_violations_total = 0;
+                self.policy_violations_offset = 0;
                 self.filter = ComponentFilter::default();
                 self.filter_popup = FilterPopup::default();
+                self.available_policy_rules.clear();
                 self.focus = Focus::Left;
             }
         }
         self.clear_messages();
+    }
+
+    // -----------------------------------------------------------------------
+    // Selection clamping
+    // -----------------------------------------------------------------------
+
+    /// After any filter change, snap `components.selected` and
+    /// `policy_violations.selected` to the first visible filtered index so
+    /// that navigation (`j`/`k`) and the detail panel remain coherent.
+    ///
+    /// If the currently-selected raw index is still visible in the filtered
+    /// view the selection is kept as-is. If it has been hidden the cursor
+    /// jumps to the first visible item (index 0 of the filtered slice), or
+    /// stays at 0 when the filtered view is empty.
+    pub fn clamp_selection_to_filter(&mut self) {
+        // Components
+        let comp_visible: Vec<usize> = self
+            .filtered_components()
+            .into_iter()
+            .map(|(i, _)| i)
+            .collect();
+        if !comp_visible.contains(&self.components.selected) {
+            self.components.selected = comp_visible.first().copied().unwrap_or(0);
+        }
+
+        // Policy violations
+        let pv_visible: Vec<usize> = self
+            .filtered_policy_violations()
+            .into_iter()
+            .map(|(i, _)| i)
+            .collect();
+        if !pv_visible.contains(&self.policy_violations.selected) {
+            self.policy_violations.selected = pv_visible.first().copied().unwrap_or(0);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -556,12 +650,21 @@ mod tests {
         assert_eq!(FilterField::PolicyStatus.label(), "Policy Status");
         assert_eq!(FilterField::ReviewStatus.label(), "Review Status");
         assert_eq!(FilterField::ApprovalStatus.label(), "Approval Status");
+        assert_eq!(FilterField::PolicyRuleName.label(), "Policy Rule Name");
     }
 
     #[test]
     fn filter_field_options_non_empty() {
+        // PolicyRuleName has dynamic options — static slice is intentionally empty
         for field in FilterField::ALL {
-            assert!(!field.options().is_empty(), "{field:?} should have options");
+            if field == FilterField::PolicyRuleName {
+                assert!(
+                    field.options().is_empty(),
+                    "PolicyRuleName static options should be empty (dynamic)"
+                );
+            } else {
+                assert!(!field.options().is_empty(), "{field:?} should have options");
+            }
         }
     }
 
@@ -574,6 +677,10 @@ mod tests {
         );
         assert_eq!(
             FilterField::ApprovalStatus.next(),
+            FilterField::PolicyRuleName
+        );
+        assert_eq!(
+            FilterField::PolicyRuleName.next(),
             FilterField::PolicyStatus
         );
     }
@@ -582,21 +689,26 @@ mod tests {
     fn filter_field_prev_wraps() {
         assert_eq!(
             FilterField::PolicyStatus.prev(),
-            FilterField::ApprovalStatus
+            FilterField::PolicyRuleName
         );
         assert_eq!(FilterField::ReviewStatus.prev(), FilterField::PolicyStatus);
         assert_eq!(
             FilterField::ApprovalStatus.prev(),
             FilterField::ReviewStatus
         );
+        assert_eq!(
+            FilterField::PolicyRuleName.prev(),
+            FilterField::ApprovalStatus
+        );
     }
 
     #[test]
     fn filter_field_all_covers_all_variants() {
-        assert_eq!(FilterField::ALL.len(), 3);
+        assert_eq!(FilterField::ALL.len(), 4);
         assert!(FilterField::ALL.contains(&FilterField::PolicyStatus));
         assert!(FilterField::ALL.contains(&FilterField::ReviewStatus));
         assert!(FilterField::ALL.contains(&FilterField::ApprovalStatus));
+        assert!(FilterField::ALL.contains(&FilterField::PolicyRuleName));
     }
 
     // ------------------------------------------------------------------
@@ -622,6 +734,9 @@ mod tests {
 
         f.approval_statuses.push("APPROVED".to_string());
         assert_eq!(f.active_count(), 3);
+
+        f.rule_ids.push("rule-id-123".to_string());
+        assert_eq!(f.active_count(), 4);
     }
 
     #[test]
@@ -760,6 +875,18 @@ mod tests {
         )));
     }
 
+    #[test]
+    fn filter_popup_move_option_noop_when_zero_options() {
+        let mut p = FilterPopup {
+            focused_option: 2,
+            ..FilterPopup::default()
+        };
+        p.move_option_down(0); // should not panic or change state
+        assert_eq!(p.focused_option, 2);
+        p.move_option_up(0);
+        assert_eq!(p.focused_option, 2);
+    }
+
     // ------------------------------------------------------------------
     // FilterPopup navigation
     // ------------------------------------------------------------------
@@ -778,12 +905,16 @@ mod tests {
         p.move_field_down();
         assert_eq!(p.current_field(), FilterField::ApprovalStatus);
         p.move_field_down();
+        assert_eq!(p.current_field(), FilterField::PolicyRuleName);
+        p.move_field_down();
         assert_eq!(p.current_field(), FilterField::PolicyStatus);
     }
 
     #[test]
     fn filter_popup_move_field_up_cycles() {
         let mut p = FilterPopup::default();
+        p.move_field_up();
+        assert_eq!(p.current_field(), FilterField::PolicyRuleName);
         p.move_field_up();
         assert_eq!(p.current_field(), FilterField::ApprovalStatus);
         p.move_field_up();
@@ -808,7 +939,7 @@ mod tests {
         let opts_len = FilterField::PolicyStatus.options().len();
         for i in 0..opts_len {
             assert_eq!(p.focused_option, i);
-            p.move_option_down();
+            p.move_option_down(opts_len);
         }
         assert_eq!(p.focused_option, 0); // wrapped back
     }
@@ -816,8 +947,8 @@ mod tests {
     #[test]
     fn filter_popup_move_option_up_cycles_within_field() {
         let mut p = FilterPopup::default();
-        p.move_option_up(); // should wrap to last option
         let opts_len = FilterField::PolicyStatus.options().len();
+        p.move_option_up(opts_len); // should wrap to last option
         assert_eq!(p.focused_option, opts_len - 1);
     }
 
@@ -851,6 +982,71 @@ mod tests {
         let mut list = StatefulList::new(vec!["a"]);
         list.selected = 99;
         assert_eq!(list.selected_item(), None);
+    }
+
+    // ------------------------------------------------------------------
+    // App::clamp_selection_to_filter
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn clamp_keeps_selection_when_still_visible() {
+        let components = vec![
+            make_component("a", Some("IN_VIOLATION"), None, None),
+            make_component("b", Some("IN_VIOLATION"), None, None),
+            make_component("c", Some("NOT_IN_VIOLATION"), None, None),
+        ];
+        let mut app = make_app_with_components(components);
+        app.filter.policy_statuses.push("IN_VIOLATION".to_string());
+        // "a" and "b" are at raw indices 0 and 1, both pass filter
+        app.components.selected = 1; // "b" — still visible
+        app.clamp_selection_to_filter();
+        assert_eq!(app.components.selected, 1); // unchanged
+    }
+
+    #[test]
+    fn clamp_snaps_to_first_when_selected_filtered_out() {
+        let components = vec![
+            make_component("a", Some("IN_VIOLATION"), None, None),
+            make_component("b", Some("NOT_IN_VIOLATION"), None, None),
+            make_component("c", Some("IN_VIOLATION"), None, None),
+        ];
+        let mut app = make_app_with_components(components);
+        // "b" at index 1 is selected but will be filtered out
+        app.components.selected = 1;
+        app.filter.policy_statuses.push("IN_VIOLATION".to_string());
+        app.clamp_selection_to_filter();
+        // first visible index is 0 ("a")
+        assert_eq!(app.components.selected, 0);
+    }
+
+    #[test]
+    fn clamp_to_zero_when_nothing_passes_filter() {
+        let components = vec![
+            make_component("a", Some("NOT_IN_VIOLATION"), None, None),
+            make_component("b", Some("NOT_IN_VIOLATION"), None, None),
+        ];
+        let mut app = make_app_with_components(components);
+        app.components.selected = 1;
+        // filter that matches nothing
+        app.filter.policy_statuses.push("IN_VIOLATION".to_string());
+        app.clamp_selection_to_filter();
+        assert_eq!(app.components.selected, 0); // defaults to 0
+    }
+
+    #[test]
+    fn clamp_policy_violations_independently() {
+        let violations = vec![
+            make_component("x", Some("IN_VIOLATION"), Some("REVIEWED"), None),
+            make_component("y", Some("IN_VIOLATION"), Some("UNREVIEWED"), None),
+        ];
+        let mut app = App::new(crate::config::Config::default());
+        app.policy_violations = StatefulList::new(violations);
+        // select "y" at raw index 1, then filter to REVIEWED only → "y" hidden
+        app.policy_violations.selected = 1;
+        app.filter.review_statuses.push("REVIEWED".to_string());
+        app.clamp_selection_to_filter();
+        // first (and only) visible policy violation is index 0 ("x")
+        assert_eq!(app.policy_violations.selected, 0);
     }
 
     // ------------------------------------------------------------------
@@ -931,7 +1127,7 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // App::go_back — filter reset
+    // App::go_back — filter reset + pagination reset
     // ------------------------------------------------------------------
 
     #[test]
@@ -943,6 +1139,25 @@ mod tests {
         app.go_back();
         assert!(app.filter.is_empty());
         assert!(!app.filter_popup.open);
+    }
+
+    #[test]
+    fn go_back_from_components_resets_pagination_fields() {
+        let mut app = App::new(crate::config::Config::default());
+        app.screen = Screen::Components;
+        app.components_total = 500;
+        app.components_offset = 100;
+        app.vulnerabilities_total = 200;
+        app.vulnerabilities_offset = 100;
+        app.policy_violations_total = 50;
+        app.policy_violations_offset = 50;
+        app.go_back();
+        assert_eq!(app.components_total, 0);
+        assert_eq!(app.components_offset, 0);
+        assert_eq!(app.vulnerabilities_total, 0);
+        assert_eq!(app.vulnerabilities_offset, 0);
+        assert_eq!(app.policy_violations_total, 0);
+        assert_eq!(app.policy_violations_offset, 0);
     }
 
     #[test]

@@ -3,7 +3,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use tokio::sync::mpsc;
 
 use crate::api::BlackDuckClient;
-use crate::app::{App, AppEvent, Focus, Screen, StatefulList, VersionTab};
+use crate::app::{App, AppEvent, ComponentFilter, Focus, Screen, StatefulList, VersionTab};
 
 pub async fn handle_events(
     app: &mut App,
@@ -181,13 +181,21 @@ fn handle_projects(
                     app.loading = true;
                     app.screen = Screen::Versions;
                     app.versions = StatefulList::default();
+                    app.versions_total = 0;
+                    app.versions_offset = 0;
                     let tx2 = tx.clone();
                     let c2 = client.clone();
                     let page_size = app.config.tui.page_size;
                     tokio::spawn(async move {
                         match c2.get_versions(&href, 0, page_size).await {
                             Ok(resp) => {
-                                let _ = tx2.send(AppEvent::VersionsLoaded(resp.items)).await;
+                                let _ = tx2
+                                    .send(AppEvent::VersionsLoaded {
+                                        items: resp.items,
+                                        total: resp.total_count,
+                                        offset: 0,
+                                    })
+                                    .await;
                             }
                             Err(e) => {
                                 let _ = tx2.send(AppEvent::Error(e.to_string())).await;
@@ -198,7 +206,14 @@ fn handle_projects(
             }
         }
         KeyCode::Char('r') => {
+            app.projects_offset = 0;
             load_projects(app, client, tx);
+        }
+        KeyCode::Char('n') => {
+            load_next_projects_page(app, client, tx);
+        }
+        KeyCode::Char('p') => {
+            load_prev_projects_page(app, client, tx);
         }
         KeyCode::Tab => {
             app.focus = if app.focus == Focus::Left {
@@ -277,9 +292,15 @@ fn handle_versions(
                     let href2 = href.clone();
                     let page_size = app.config.tui.page_size;
                     tokio::spawn(async move {
-                        match c2.get_components(&href2, 0, page_size).await {
+                        match c2.get_components(&href2, 0, page_size, &[]).await {
                             Ok(resp) => {
-                                let _ = tx2.send(AppEvent::ComponentsLoaded(resp.items)).await;
+                                let _ = tx2
+                                    .send(AppEvent::ComponentsLoaded {
+                                        items: resp.items,
+                                        total: resp.total_count,
+                                        offset: 0,
+                                    })
+                                    .await;
                             }
                             Err(e) => {
                                 let _ = tx2.send(AppEvent::Error(e.to_string())).await;
@@ -288,6 +309,12 @@ fn handle_versions(
                     });
                 }
             }
+        }
+        KeyCode::Char('n') => {
+            load_next_versions_page(app, client, tx);
+        }
+        KeyCode::Char('p') => {
+            load_prev_versions_page(app, client, tx);
         }
         KeyCode::Backspace | KeyCode::Esc => {
             app.go_back();
@@ -326,9 +353,24 @@ fn handle_version_detail(
         return;
     }
 
+    // If the filter popup is open, delegate all keys to it
+    if app.filter_popup.open {
+        handle_filter_popup(app, client, tx, code);
+        return;
+    }
+
     match code {
         KeyCode::Char('q') => {
             app.should_quit = true;
+        }
+        KeyCode::Char('f') => {
+            open_filter_popup(app, client, tx);
+        }
+        KeyCode::Char('n') => {
+            load_next_page(app, client, tx);
+        }
+        KeyCode::Char('p') => {
+            load_prev_page(app, client, tx);
         }
         KeyCode::Char('j') | KeyCode::Down => {
             if app.focus == Focus::Left {
@@ -473,10 +515,17 @@ fn switch_version_tab(
             app.loading = true;
             let tx2 = tx.clone();
             let c2 = client.clone();
+            let filter_params = app.filter.to_api_params();
             tokio::spawn(async move {
-                match c2.get_components(&href, 0, page_size).await {
+                match c2.get_components(&href, 0, page_size, &filter_params).await {
                     Ok(resp) => {
-                        let _ = tx2.send(AppEvent::ComponentsLoaded(resp.items)).await;
+                        let _ = tx2
+                            .send(AppEvent::ComponentsLoaded {
+                                items: resp.items,
+                                total: resp.total_count,
+                                offset: 0,
+                            })
+                            .await;
                     }
                     Err(e) => {
                         let _ = tx2.send(AppEvent::Error(e.to_string())).await;
@@ -491,7 +540,13 @@ fn switch_version_tab(
             tokio::spawn(async move {
                 match c2.get_vulnerabilities(&href, 0, page_size).await {
                     Ok(resp) => {
-                        let _ = tx2.send(AppEvent::VulnerabilitiesLoaded(resp.items)).await;
+                        let _ = tx2
+                            .send(AppEvent::VulnerabilitiesLoaded {
+                                items: resp.items,
+                                total: resp.total_count,
+                                offset: 0,
+                            })
+                            .await;
                     }
                     Err(e) => {
                         let _ = tx2.send(AppEvent::Error(e.to_string())).await;
@@ -503,10 +558,20 @@ fn switch_version_tab(
             app.loading = true;
             let tx2 = tx.clone();
             let c2 = client.clone();
+            let extra_params = pv_extra_filter_params(&app.filter);
             tokio::spawn(async move {
-                match c2.get_policy_violations(&href, 0, page_size).await {
+                match c2
+                    .get_policy_violations(&href, 0, page_size, &extra_params)
+                    .await
+                {
                     Ok(resp) => {
-                        let _ = tx2.send(AppEvent::PolicyViolationsLoaded(resp.items)).await;
+                        let _ = tx2
+                            .send(AppEvent::PolicyViolationsLoaded {
+                                items: resp.items,
+                                total: resp.total_count,
+                                offset: 0,
+                            })
+                            .await;
                     }
                     Err(e) => {
                         let _ = tx2.send(AppEvent::Error(e.to_string())).await;
@@ -515,6 +580,421 @@ fn switch_version_tab(
             });
         }
         _ => {} // already loaded
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pagination helpers
+// ---------------------------------------------------------------------------
+
+/// Build the extra `filter=` params for the Policy Violations API endpoint.
+///
+/// The `policyStatus:IN_VIOLATION` filter is already hardcoded in `get_policy_violations`;
+/// this helper adds the `reviewStatus` and `approvalStatus` params from the active filter.
+/// `policy_statuses` and `rule_names` are intentionally excluded here — the former is
+/// hardcoded and the latter is not supported server-side.
+fn pv_extra_filter_params(filter: &crate::app::ComponentFilter) -> Vec<(&'static str, String)> {
+    let mut params: Vec<(&'static str, String)> = Vec::new();
+    for s in &filter.review_statuses {
+        params.push(("filter", format!("reviewStatus:{s}")));
+    }
+    for s in &filter.approval_statuses {
+        params.push(("filter", format!("approvalStatus:{s}")));
+    }
+    params
+}
+
+fn load_next_page(app: &mut App, client: &mut BlackDuckClient, tx: &mpsc::Sender<AppEvent>) {
+    let page_size = app.config.tui.page_size;
+    let href = app
+        .selected_version
+        .as_ref()
+        .and_then(|v| v.href())
+        .map(ToString::to_string);
+    let Some(href) = href else { return };
+
+    match app.version_tab {
+        VersionTab::Components => {
+            let next_offset = app.components_offset + page_size;
+            if u64::from(next_offset) >= app.components_total {
+                return; // already on last page
+            }
+            app.loading = true;
+            let tx2 = tx.clone();
+            let c2 = client.clone();
+            let filter_params = app.filter.to_api_params();
+            tokio::spawn(async move {
+                match c2
+                    .get_components(&href, next_offset, page_size, &filter_params)
+                    .await
+                {
+                    Ok(resp) => {
+                        let _ = tx2
+                            .send(AppEvent::ComponentsLoaded {
+                                items: resp.items,
+                                total: resp.total_count,
+                                offset: next_offset,
+                            })
+                            .await;
+                    }
+                    Err(e) => {
+                        let _ = tx2.send(AppEvent::Error(e.to_string())).await;
+                    }
+                }
+            });
+        }
+        VersionTab::Vulnerabilities => {
+            let next_offset = app.vulnerabilities_offset + page_size;
+            if u64::from(next_offset) >= app.vulnerabilities_total {
+                return;
+            }
+            app.loading = true;
+            let tx2 = tx.clone();
+            let c2 = client.clone();
+            tokio::spawn(async move {
+                match c2.get_vulnerabilities(&href, next_offset, page_size).await {
+                    Ok(resp) => {
+                        let _ = tx2
+                            .send(AppEvent::VulnerabilitiesLoaded {
+                                items: resp.items,
+                                total: resp.total_count,
+                                offset: next_offset,
+                            })
+                            .await;
+                    }
+                    Err(e) => {
+                        let _ = tx2.send(AppEvent::Error(e.to_string())).await;
+                    }
+                }
+            });
+        }
+        VersionTab::PolicyViolations => {
+            let next_offset = app.policy_violations_offset + page_size;
+            if u64::from(next_offset) >= app.policy_violations_total {
+                return;
+            }
+            app.loading = true;
+            let tx2 = tx.clone();
+            let c2 = client.clone();
+            // For policy violations, only pass review/approval filter params server-side.
+            // policy_status is always hardcoded as IN_VIOLATION; rule_names are client-side only.
+            let extra_params = pv_extra_filter_params(&app.filter);
+            tokio::spawn(async move {
+                match c2
+                    .get_policy_violations(&href, next_offset, page_size, &extra_params)
+                    .await
+                {
+                    Ok(resp) => {
+                        let _ = tx2
+                            .send(AppEvent::PolicyViolationsLoaded {
+                                items: resp.items,
+                                total: resp.total_count,
+                                offset: next_offset,
+                            })
+                            .await;
+                    }
+                    Err(e) => {
+                        let _ = tx2.send(AppEvent::Error(e.to_string())).await;
+                    }
+                }
+            });
+        }
+    }
+}
+
+fn load_prev_page(app: &mut App, client: &mut BlackDuckClient, tx: &mpsc::Sender<AppEvent>) {
+    let page_size = app.config.tui.page_size;
+    let href = app
+        .selected_version
+        .as_ref()
+        .and_then(|v| v.href())
+        .map(ToString::to_string);
+    let Some(href) = href else { return };
+
+    match app.version_tab {
+        VersionTab::Components => {
+            if app.components_offset == 0 {
+                return; // already on first page
+            }
+            let prev_offset = app.components_offset.saturating_sub(page_size);
+            app.loading = true;
+            let tx2 = tx.clone();
+            let c2 = client.clone();
+            let filter_params = app.filter.to_api_params();
+            tokio::spawn(async move {
+                match c2
+                    .get_components(&href, prev_offset, page_size, &filter_params)
+                    .await
+                {
+                    Ok(resp) => {
+                        let _ = tx2
+                            .send(AppEvent::ComponentsLoaded {
+                                items: resp.items,
+                                total: resp.total_count,
+                                offset: prev_offset,
+                            })
+                            .await;
+                    }
+                    Err(e) => {
+                        let _ = tx2.send(AppEvent::Error(e.to_string())).await;
+                    }
+                }
+            });
+        }
+        VersionTab::Vulnerabilities => {
+            if app.vulnerabilities_offset == 0 {
+                return;
+            }
+            let prev_offset = app.vulnerabilities_offset.saturating_sub(page_size);
+            app.loading = true;
+            let tx2 = tx.clone();
+            let c2 = client.clone();
+            tokio::spawn(async move {
+                match c2.get_vulnerabilities(&href, prev_offset, page_size).await {
+                    Ok(resp) => {
+                        let _ = tx2
+                            .send(AppEvent::VulnerabilitiesLoaded {
+                                items: resp.items,
+                                total: resp.total_count,
+                                offset: prev_offset,
+                            })
+                            .await;
+                    }
+                    Err(e) => {
+                        let _ = tx2.send(AppEvent::Error(e.to_string())).await;
+                    }
+                }
+            });
+        }
+        VersionTab::PolicyViolations => {
+            if app.policy_violations_offset == 0 {
+                return;
+            }
+            let prev_offset = app.policy_violations_offset.saturating_sub(page_size);
+            app.loading = true;
+            let tx2 = tx.clone();
+            let c2 = client.clone();
+            let extra_params = pv_extra_filter_params(&app.filter);
+            tokio::spawn(async move {
+                match c2
+                    .get_policy_violations(&href, prev_offset, page_size, &extra_params)
+                    .await
+                {
+                    Ok(resp) => {
+                        let _ = tx2
+                            .send(AppEvent::PolicyViolationsLoaded {
+                                items: resp.items,
+                                total: resp.total_count,
+                                offset: prev_offset,
+                            })
+                            .await;
+                    }
+                    Err(e) => {
+                        let _ = tx2.send(AppEvent::Error(e.to_string())).await;
+                    }
+                }
+            });
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Filter popup
+// ---------------------------------------------------------------------------
+
+/// Open the filter popup. If policy rule names haven't been fetched yet,
+/// kick off the API fetch using all hrefs accumulated across every page
+/// loaded so far (stored in `app.component_policy_rule_hrefs`).
+fn open_filter_popup(app: &mut App, client: &mut BlackDuckClient, tx: &mpsc::Sender<AppEvent>) {
+    app.filter_popup.open = true;
+
+    // Fetch policy rule filter options on-demand if not yet loaded
+    if app.available_policy_rules.is_empty() {
+        let version_href = app
+            .selected_version
+            .as_ref()
+            .and_then(|v| v.href())
+            .map(ToString::to_string);
+
+        if let Some(href) = version_href {
+            let tx2 = tx.clone();
+            let c2 = client.clone();
+            tokio::spawn(async move {
+                match c2.get_component_filters(&href, "policyRuleViolation").await {
+                    Ok(resp) => {
+                        // Extract (label, key) pairs where key is already "PR~uuid" format
+                        let rules: Vec<(String, String)> = resp
+                            .values
+                            .into_iter()
+                            .map(|opt| (opt.label, opt.key))
+                            .collect();
+                        let _ = tx2.send(AppEvent::PolicyRulesLoaded(rules)).await;
+                    }
+                    Err(e) => {
+                        let _ = tx2.send(AppEvent::Error(e.to_string())).await;
+                    }
+                }
+            });
+        }
+    }
+}
+
+/// Re-fetch page 0 of the current version-detail tab with the currently active filter.
+///
+/// Called when the filter popup closes (Esc) or when the filter is cleared (`c`), so that
+/// the pagination reflects the new server-side filtered total count.
+///
+/// CRITICAL: Also clears cached data for the other tabs (without fetching) so that when
+/// the user switches tabs via `switch_version_tab`, the `is_empty()` check will trigger
+/// a fresh re-fetch with the new filter applied. This ensures pagination totals are
+/// always correct for the active filter.
+fn refetch_with_filter(app: &mut App, client: &mut BlackDuckClient, tx: &mpsc::Sender<AppEvent>) {
+    let href = app
+        .selected_version
+        .as_ref()
+        .and_then(|v| v.href())
+        .map(ToString::to_string);
+    let Some(href) = href else { return };
+
+    let page_size = app.config.tui.page_size;
+
+    // Clear cached data for ALL tabs so switch_version_tab will re-fetch with new filter
+    match app.version_tab {
+        VersionTab::Components => {
+            // Clear sibling tabs (PolicyViolations) — will re-fetch when user switches to them
+            app.policy_violations = StatefulList::default();
+            app.policy_violations_offset = 0;
+            app.policy_violations_total = 0;
+            // Re-fetch current tab (Components) with filter
+            app.components_offset = 0;
+            app.components = StatefulList::default();
+            app.loading = true;
+            let tx2 = tx.clone();
+            let c2 = client.clone();
+            let filter_params = app.filter.to_api_params();
+            tokio::spawn(async move {
+                match c2.get_components(&href, 0, page_size, &filter_params).await {
+                    Ok(resp) => {
+                        let _ = tx2
+                            .send(AppEvent::ComponentsLoaded {
+                                items: resp.items,
+                                total: resp.total_count,
+                                offset: 0,
+                            })
+                            .await;
+                    }
+                    Err(e) => {
+                        let _ = tx2.send(AppEvent::Error(e.to_string())).await;
+                    }
+                }
+            });
+        }
+        VersionTab::Vulnerabilities => {
+            // Vulnerabilities tab has no filter popup support yet; nothing to do.
+        }
+        VersionTab::PolicyViolations => {
+            // Clear sibling tabs (Components) — will re-fetch when user switches to them
+            app.components = StatefulList::default();
+            app.components_offset = 0;
+            app.components_total = 0;
+            // Re-fetch current tab (PolicyViolations) with filter
+            app.policy_violations_offset = 0;
+            app.policy_violations = StatefulList::default();
+            app.loading = true;
+            let tx2 = tx.clone();
+            let c2 = client.clone();
+            let extra_params = pv_extra_filter_params(&app.filter);
+            tokio::spawn(async move {
+                match c2
+                    .get_policy_violations(&href, 0, page_size, &extra_params)
+                    .await
+                {
+                    Ok(resp) => {
+                        let _ = tx2
+                            .send(AppEvent::PolicyViolationsLoaded {
+                                items: resp.items,
+                                total: resp.total_count,
+                                offset: 0,
+                            })
+                            .await;
+                    }
+                    Err(e) => {
+                        let _ = tx2.send(AppEvent::Error(e.to_string())).await;
+                    }
+                }
+            });
+        }
+    }
+}
+
+/// Handle keypresses while the filter popup is open.
+fn handle_filter_popup(
+    app: &mut App,
+    client: &mut BlackDuckClient,
+    tx: &mpsc::Sender<AppEvent>,
+    code: KeyCode,
+) {
+    use crate::app::FilterField;
+
+    let current = app.filter_popup.current_field();
+
+    // Resolve option count: static options for most fields; dynamic for PolicyRuleName
+    let options_count = match current {
+        FilterField::PolicyRuleName => app.available_policy_rules.len(),
+        _ => current.options().len(),
+    };
+
+    match code {
+        KeyCode::Esc => {
+            app.filter_popup.open = false;
+            app.clamp_selection_to_filter();
+            // Re-fetch page 0 with the current filter applied server-side
+            refetch_with_filter(app, client, tx);
+        }
+        KeyCode::Char('c') => {
+            app.filter = ComponentFilter::default();
+            app.clamp_selection_to_filter();
+            // Re-fetch page 0 with cleared filter
+            refetch_with_filter(app, client, tx);
+        }
+        KeyCode::Char('j') | KeyCode::Down => {
+            app.filter_popup.move_field_down();
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            app.filter_popup.move_field_up();
+        }
+        KeyCode::Tab | KeyCode::Right => {
+            // Move option cursor down within the focused field
+            app.filter_popup.move_option_down(options_count);
+        }
+        KeyCode::BackTab | KeyCode::Left => {
+            app.filter_popup.move_option_up(options_count);
+        }
+        KeyCode::Char(' ') => {
+            // Toggle the currently highlighted option
+            if options_count == 0 {
+                return;
+            }
+            let idx = app.filter_popup.focused_option;
+            let value = match current {
+                FilterField::PolicyRuleName => app
+                    .available_policy_rules
+                    .get(idx)
+                    .map(|(_name, id)| id.clone()),
+                _ => current.options().get(idx).map(|s| (*s).to_string()),
+            };
+            if let Some(val) = value {
+                let set = match current {
+                    FilterField::PolicyStatus => &mut app.filter.policy_statuses,
+                    FilterField::ReviewStatus => &mut app.filter.review_statuses,
+                    FilterField::ApprovalStatus => &mut app.filter.approval_statuses,
+                    FilterField::PolicyRuleName => &mut app.filter.rule_ids,
+                };
+                ComponentFilter::toggle(set, &val);
+                app.clamp_selection_to_filter();
+            }
+        }
+        _ => {}
     }
 }
 
@@ -540,6 +1020,158 @@ fn handle_search(app: &mut App, code: KeyCode) {
 }
 
 // ---------------------------------------------------------------------------
+// Projects pagination helpers
+// ---------------------------------------------------------------------------
+
+fn load_next_projects_page(
+    app: &mut App,
+    client: &mut BlackDuckClient,
+    tx: &mpsc::Sender<AppEvent>,
+) {
+    let page_size = app.config.tui.page_size;
+    let next_offset = app.projects_offset + page_size;
+    if u64::from(next_offset) >= app.projects_total {
+        return; // already on last page
+    }
+    app.projects_offset = next_offset;
+    app.projects = StatefulList::default();
+    app.loading = true;
+    let tx2 = tx.clone();
+    let c2 = client.clone();
+    tokio::spawn(async move {
+        match c2.get_projects(next_offset, page_size).await {
+            Ok(resp) => {
+                let _ = tx2
+                    .send(AppEvent::ProjectsLoaded {
+                        items: resp.items,
+                        total: resp.total_count,
+                        offset: next_offset,
+                    })
+                    .await;
+            }
+            Err(e) => {
+                let _ = tx2.send(AppEvent::Error(e.to_string())).await;
+            }
+        }
+    });
+}
+
+fn load_prev_projects_page(
+    app: &mut App,
+    client: &mut BlackDuckClient,
+    tx: &mpsc::Sender<AppEvent>,
+) {
+    if app.projects_offset == 0 {
+        return; // already on first page
+    }
+    let page_size = app.config.tui.page_size;
+    let prev_offset = app.projects_offset.saturating_sub(page_size);
+    app.projects_offset = prev_offset;
+    app.projects = StatefulList::default();
+    app.loading = true;
+    let tx2 = tx.clone();
+    let c2 = client.clone();
+    tokio::spawn(async move {
+        match c2.get_projects(prev_offset, page_size).await {
+            Ok(resp) => {
+                let _ = tx2
+                    .send(AppEvent::ProjectsLoaded {
+                        items: resp.items,
+                        total: resp.total_count,
+                        offset: prev_offset,
+                    })
+                    .await;
+            }
+            Err(e) => {
+                let _ = tx2.send(AppEvent::Error(e.to_string())).await;
+            }
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Versions pagination helpers
+// ---------------------------------------------------------------------------
+
+fn load_next_versions_page(
+    app: &mut App,
+    client: &mut BlackDuckClient,
+    tx: &mpsc::Sender<AppEvent>,
+) {
+    let page_size = app.config.tui.page_size;
+    let next_offset = app.versions_offset + page_size;
+    if u64::from(next_offset) >= app.versions_total {
+        return;
+    }
+    let href = app
+        .selected_project
+        .as_ref()
+        .and_then(|p| p.href())
+        .map(ToString::to_string);
+    let Some(href) = href else { return };
+    app.versions_offset = next_offset;
+    app.versions = StatefulList::default();
+    app.loading = true;
+    let tx2 = tx.clone();
+    let c2 = client.clone();
+    tokio::spawn(async move {
+        match c2.get_versions(&href, next_offset, page_size).await {
+            Ok(resp) => {
+                let _ = tx2
+                    .send(AppEvent::VersionsLoaded {
+                        items: resp.items,
+                        total: resp.total_count,
+                        offset: next_offset,
+                    })
+                    .await;
+            }
+            Err(e) => {
+                let _ = tx2.send(AppEvent::Error(e.to_string())).await;
+            }
+        }
+    });
+}
+
+fn load_prev_versions_page(
+    app: &mut App,
+    client: &mut BlackDuckClient,
+    tx: &mpsc::Sender<AppEvent>,
+) {
+    if app.versions_offset == 0 {
+        return;
+    }
+    let page_size = app.config.tui.page_size;
+    let prev_offset = app.versions_offset.saturating_sub(page_size);
+    let href = app
+        .selected_project
+        .as_ref()
+        .and_then(|p| p.href())
+        .map(ToString::to_string);
+    let Some(href) = href else { return };
+    app.versions_offset = prev_offset;
+    app.versions = StatefulList::default();
+    app.loading = true;
+    let tx2 = tx.clone();
+    let c2 = client.clone();
+    tokio::spawn(async move {
+        match c2.get_versions(&href, prev_offset, page_size).await {
+            Ok(resp) => {
+                let _ = tx2
+                    .send(AppEvent::VersionsLoaded {
+                        items: resp.items,
+                        total: resp.total_count,
+                        offset: prev_offset,
+                    })
+                    .await;
+            }
+            Err(e) => {
+                let _ = tx2.send(AppEvent::Error(e.to_string())).await;
+            }
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Load projects helper
 // ---------------------------------------------------------------------------
 
@@ -554,10 +1186,17 @@ pub fn load_projects(app: &mut App, client: &mut BlackDuckClient, tx: &mpsc::Sen
     let tx2 = tx.clone();
     let c2 = client.clone();
     let page_size = app.config.tui.page_size;
+    let offset = app.projects_offset;
     tokio::spawn(async move {
-        match c2.get_projects(0, page_size).await {
+        match c2.get_projects(offset, page_size).await {
             Ok(resp) => {
-                let _ = tx2.send(AppEvent::ProjectsLoaded(resp.items)).await;
+                let _ = tx2
+                    .send(AppEvent::ProjectsLoaded {
+                        items: resp.items,
+                        total: resp.total_count,
+                        offset,
+                    })
+                    .await;
             }
             Err(e) => {
                 let _ = tx2.send(AppEvent::Error(e.to_string())).await;

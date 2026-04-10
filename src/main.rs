@@ -114,6 +114,10 @@ async fn run(
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "event handler dispatches across many event variants; each arm is simple"
+)]
 async fn handle_app_event(
     app: &mut App,
     client: &mut api::BlackDuckClient,
@@ -148,47 +152,96 @@ async fn handle_app_event(
             load_projects(app, client, tx);
         }
 
-        AppEvent::ProjectsLoaded(projects) => {
+        AppEvent::ProjectsLoaded {
+            items: projects,
+            total,
+            offset,
+        } => {
             app.loading = false;
             let count = projects.len();
             app.projects = StatefulList::new(projects);
+            app.projects_total = total;
+            app.projects_offset = offset;
             app.set_status(format!("Loaded {count} projects"));
         }
 
-        AppEvent::VersionsLoaded(versions) => {
+        AppEvent::VersionsLoaded {
+            items: versions,
+            total,
+            offset,
+        } => {
             app.loading = false;
             let count = versions.len();
             app.versions = StatefulList::new(versions);
+            app.versions_total = total;
+            app.versions_offset = offset;
             app.set_status(format!("Loaded {count} versions"));
         }
 
-        AppEvent::ComponentsLoaded(components) => {
+        AppEvent::ComponentsLoaded {
+            items: components,
+            total,
+            offset,
+        } => {
             app.loading = false;
             let count = components.len();
             app.components = StatefulList::new(components);
-            app.set_status(format!("Loaded {count} components"));
+            app.components_total = total;
+            app.components_offset = offset;
+            app.set_status(format!(
+                "Loaded {count} components (page offset {offset}, total {total})"
+            ));
         }
 
-        AppEvent::VulnerabilitiesLoaded(vulns) => {
+        AppEvent::VulnerabilitiesLoaded {
+            items: vulns,
+            total,
+            offset,
+        } => {
             app.loading = false;
             let count = vulns.len();
             app.vulnerabilities = StatefulList::new(vulns);
-            app.set_status(format!("Loaded {count} vulnerabilities"));
+            app.vulnerabilities_total = total;
+            app.vulnerabilities_offset = offset;
+            app.set_status(format!(
+                "Loaded {count} vulnerabilities (page offset {offset}, total {total})"
+            ));
         }
 
-        AppEvent::PolicyViolationsLoaded(violations) => {
+        AppEvent::PolicyViolationsLoaded {
+            items: violations,
+            total,
+            offset,
+        } => {
             app.loading = false;
             let count = violations.len();
             app.policy_violations = StatefulList::new(violations);
-            app.set_status(format!("Loaded {count} policy violations"));
+            app.policy_violations_total = total;
+            app.policy_violations_offset = offset;
+            app.set_status(format!(
+                "Loaded {count} policy violations (page offset {offset}, total {total})"
+            ));
+        }
+
+        AppEvent::PolicyRulesLoaded(rules) => {
+            // Deduplicate and sort the incoming rules by name, then store on App.
+            let mut sorted = rules;
+            sorted.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+            sorted.dedup_by(|a, b| a.1 == b.1); // dedup by ID
+            app.available_policy_rules = sorted;
         }
 
         AppEvent::Error(msg) => {
             app.set_error(msg.clone());
-            // If auth failed from login screen, show on login
-            if app.screen == Screen::Login {
+            // If auth failed while on the Projects screen (startup auto-auth),
+            // drop back to Login so the user can correct the URL / token.
+            if app.screen == Screen::Projects && !app.loading {
+                app.screen = Screen::Login;
+                app.login_error = Some(msg);
+            } else if app.screen == Screen::Login {
                 app.login_error = Some(msg);
             }
+            app.loading = false;
         }
     }
 

@@ -156,6 +156,84 @@ pub struct ComponentsResponse {
     pub items: Vec<BomComponent>,
 }
 
+impl BomComponent {
+    /// Returns the href for this component's policy-rules link from `_meta.links`,
+    /// or `None` if no such link exists.
+    #[cfg_attr(not(test), expect(dead_code))]
+    pub fn policy_rules_href(&self) -> Option<&str> {
+        self.meta
+            .as_ref()
+            .and_then(|m| m.links.as_ref())
+            .and_then(|links| {
+                links
+                    .iter()
+                    .find(|l| l.rel == "policy-rules")
+                    .map(|l| l.href.as_str())
+            })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Component Filters
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComponentFilterOption {
+    pub key: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComponentFiltersResponse {
+    pub name: String,
+    pub label: String,
+    pub values: Vec<ComponentFilterOption>,
+    #[serde(rename = "_meta")]
+    pub meta: Option<Meta>,
+}
+
+// ---------------------------------------------------------------------------
+// Policy Rules
+// ---------------------------------------------------------------------------
+
+/// A policy rule that has been violated by a BOM component.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PolicyRule {
+    /// Human-readable name of the policy rule.
+    #[serde(rename = "policyName")]
+    pub policy_name: Option<String>,
+    pub name: Option<String>,
+    pub description: Option<String>,
+    #[serde(rename = "_meta")]
+    pub meta: Option<Meta>,
+}
+
+impl PolicyRule {
+    /// Returns the best display name for this rule: `policyName` if set, then `name`, else `""`.
+    #[cfg_attr(not(test), expect(dead_code))]
+    pub fn display_name(&self) -> &str {
+        self.policy_name
+            .as_deref()
+            .or(self.name.as_deref())
+            .unwrap_or("")
+    }
+
+    /// Extract the policy rule ID from the meta href.
+    ///
+    /// Example: `<https://host/api/policy-rules/abc-123>` → `"abc-123"`
+    #[expect(dead_code)]
+    pub fn id(&self) -> Option<&str> {
+        self.meta.as_ref().and_then(|m| m.href.rsplit('/').next())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyRulesResponse {
+    #[serde(rename = "totalCount")]
+    pub total_count: u64,
+    pub items: Vec<PolicyRule>,
+}
+
 // ---------------------------------------------------------------------------
 // Vulnerabilities
 // ---------------------------------------------------------------------------
@@ -458,5 +536,99 @@ mod tests {
         let links = m.links.unwrap();
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].rel, "versions");
+    }
+
+    // ------------------------------------------------------------------
+    // BomComponent::policy_rules_href
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn bom_component_policy_rules_href_found() {
+        let c = BomComponent {
+            component_name: "lib".to_string(),
+            meta: Some(Meta {
+                href: "https://example.com/api/projects/1/versions/2/components/3".to_string(),
+                links: Some(vec![
+                    Link {
+                        rel: "policy-rules".to_string(),
+                        href: "https://example.com/api/projects/1/versions/2/components/3/policy-rules"
+                            .to_string(),
+                    },
+                    Link {
+                        rel: "other".to_string(),
+                        href: "https://example.com/other".to_string(),
+                    },
+                ]),
+            }),
+            ..BomComponent::default()
+        };
+        assert_eq!(
+            c.policy_rules_href(),
+            Some("https://example.com/api/projects/1/versions/2/components/3/policy-rules")
+        );
+    }
+
+    #[test]
+    fn bom_component_policy_rules_href_none_when_no_link() {
+        let c = BomComponent {
+            component_name: "lib".to_string(),
+            meta: Some(Meta {
+                href: "https://example.com/api/component".to_string(),
+                links: Some(vec![Link {
+                    rel: "other".to_string(),
+                    href: "https://example.com/other".to_string(),
+                }]),
+            }),
+            ..BomComponent::default()
+        };
+        assert_eq!(c.policy_rules_href(), None);
+    }
+
+    #[test]
+    fn bom_component_policy_rules_href_none_when_no_meta() {
+        let c = BomComponent::default();
+        assert_eq!(c.policy_rules_href(), None);
+    }
+
+    // ------------------------------------------------------------------
+    // PolicyRule::display_name
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn policy_rule_display_name_prefers_policy_name() {
+        let r = PolicyRule {
+            policy_name: Some("Copyleft Licenses".to_string()),
+            name: Some("other".to_string()),
+            ..PolicyRule::default()
+        };
+        assert_eq!(r.display_name(), "Copyleft Licenses");
+    }
+
+    #[test]
+    fn policy_rule_display_name_falls_back_to_name() {
+        let r = PolicyRule {
+            policy_name: None,
+            name: Some("Security Policy".to_string()),
+            ..PolicyRule::default()
+        };
+        assert_eq!(r.display_name(), "Security Policy");
+    }
+
+    #[test]
+    fn policy_rule_display_name_empty_when_both_none() {
+        let r = PolicyRule::default();
+        assert_eq!(r.display_name(), "");
+    }
+
+    #[test]
+    fn policy_rules_response_deserializes() {
+        let json = r#"{
+            "totalCount": 1,
+            "items": [{"policyName": "Copyleft Licenses", "name": "cl-rule"}]
+        }"#;
+        let resp: PolicyRulesResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.total_count, 1);
+        assert_eq!(resp.items.len(), 1);
+        assert_eq!(resp.items[0].display_name(), "Copyleft Licenses");
     }
 }

@@ -3,7 +3,8 @@ use tracing::debug;
 
 use super::error::ApiError;
 use super::types::{
-    AuthToken, ComponentsResponse, ProjectsResponse, VersionsResponse, VulnerabilitiesResponse,
+    AuthToken, ComponentFiltersResponse, ComponentsResponse, PolicyRulesResponse, ProjectsResponse,
+    VersionsResponse, VulnerabilitiesResponse,
 };
 
 #[derive(Debug, Clone)]
@@ -136,13 +137,22 @@ impl BlackDuckClient {
     }
 
     /// Fetch a page of BOM components for a version.
+    ///
+    /// `filter_params` is a slice of `("filter", "fieldName:VALUE")` pairs built
+    /// from `ComponentFilter::to_api_params()`. Pass an empty slice for no filter.
     pub async fn get_components(
         &self,
         version_href: &str,
         offset: u32,
         limit: u32,
+        filter_params: &[(&str, String)],
     ) -> Result<ComponentsResponse, ApiError> {
-        let url = format!("{version_href}/components?offset={offset}&limit={limit}");
+        let filter_qs: String = filter_params.iter().fold(String::new(), |mut acc, (k, v)| {
+            use std::fmt::Write as _;
+            let _ = write!(acc, "&{k}={v}");
+            acc
+        });
+        let url = format!("{version_href}/components?offset={offset}&limit={limit}{filter_qs}");
         debug!("GET {}", url);
 
         let response = self
@@ -208,14 +218,25 @@ impl BlackDuckClient {
     /// Uses `GET {version_href}/components?filter=policyStatus:IN_VIOLATION` which returns
     /// the same `ComponentsResponse` shape as `get_components`, but filtered to only the
     /// components whose `policyStatus` is `"IN_VIOLATION"`.
+    ///
+    /// `extra_filter_params` allows additional `filter=` params (e.g. `reviewStatus:REVIEWED`)
+    /// to be appended after the hardcoded `policyStatus:IN_VIOLATION` filter.
     pub async fn get_policy_violations(
         &self,
         version_href: &str,
         offset: u32,
         limit: u32,
+        extra_filter_params: &[(&str, String)],
     ) -> Result<ComponentsResponse, ApiError> {
+        let extra_qs: String = extra_filter_params
+            .iter()
+            .fold(String::new(), |mut acc, (k, v)| {
+                use std::fmt::Write as _;
+                let _ = write!(acc, "&{k}={v}");
+                acc
+            });
         let url = format!(
-            "{version_href}/components?filter=policyStatus:IN_VIOLATION&offset={offset}&limit={limit}"
+            "{version_href}/components?filter=policyStatus:IN_VIOLATION&offset={offset}&limit={limit}{extra_qs}"
         );
         debug!("GET {}", url);
 
@@ -241,5 +262,79 @@ impl BlackDuckClient {
         }
 
         Ok(response.json::<ComponentsResponse>().await?)
+    }
+
+    /// Fetch a page of violated policy rules for a specific BOM component.
+    ///
+    /// The `policy_rules_href` comes from the component's `_meta.links` where `rel == "policy-rules"`.
+    /// Pass `offset = 0` and a suitable `limit` (e.g. 100) for the first page, then advance
+    /// `offset` until `offset >= total_count` to paginate through all rules.
+    ///
+    /// NOTE: This method is kept for potential future use, but currently unused since we fetch
+    /// policy rules via `/components-filters` endpoint instead.
+    #[expect(dead_code, reason = "Kept for potential future use")]
+    pub async fn get_component_policy_rules(
+        &self,
+        policy_rules_href: &str,
+        offset: u32,
+        limit: u32,
+    ) -> Result<PolicyRulesResponse, ApiError> {
+        let url = format!("{policy_rules_href}?offset={offset}&limit={limit}");
+        debug!("GET {}", url);
+
+        let response = self
+            .client
+            .get(&url)
+            .header("Authorization", self.auth_header()?)
+            .header(
+                "Accept",
+                "application/vnd.blackducksoftware.bill-of-materials-6+json",
+            )
+            .send()
+            .await?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(ApiError::StatusCode {
+                context: "Failed to fetch component policy rules",
+                status,
+                body,
+            });
+        }
+
+        Ok(response.json::<PolicyRulesResponse>().await?)
+    }
+
+    /// Fetch available filter options for a version's components.
+    ///
+    /// Example: `filterKey=policyRuleViolation` returns all policy rules that have violations
+    /// in this version, with their IDs (already prefixed with "PR~") and display names.
+    pub async fn get_component_filters(
+        &self,
+        version_href: &str,
+        filter_key: &str,
+    ) -> Result<ComponentFiltersResponse, ApiError> {
+        let url = format!("{version_href}/components-filters?filterKey={filter_key}");
+        debug!("GET {}", url);
+
+        let response = self
+            .client
+            .get(&url)
+            .header("Authorization", self.auth_header()?)
+            .send()
+            .await?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(ApiError::StatusCode {
+                context: "Failed to fetch component filters",
+                status,
+                body,
+            });
+        }
+
+        Ok(response.json::<ComponentFiltersResponse>().await?)
     }
 }
