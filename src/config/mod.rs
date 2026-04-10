@@ -102,3 +102,137 @@ impl Config {
         Ok(())
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Serialise all tests that touch process-wide env vars so they do not
+    /// race each other (Rust test threads share the same process).
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    // ------------------------------------------------------------------
+    // Default values
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn server_config_default_url_is_empty() {
+        let cfg = ServerConfig::default();
+        assert!(cfg.url.is_empty());
+    }
+
+    #[test]
+    fn server_config_default_token_is_none() {
+        let cfg = ServerConfig::default();
+        assert!(cfg.api_token.is_none());
+    }
+
+    #[test]
+    fn server_config_default_accept_invalid_certs_is_false() {
+        let cfg = ServerConfig::default();
+        assert!(!cfg.accept_invalid_certs);
+    }
+
+    #[test]
+    fn tui_config_default_page_size_is_100() {
+        let cfg = TuiConfig::default();
+        assert_eq!(cfg.page_size, 100);
+    }
+
+    #[test]
+    fn config_default_is_composed_of_defaults() {
+        let cfg = Config::default();
+        assert!(cfg.server.url.is_empty());
+        assert_eq!(cfg.tui.page_size, 100);
+    }
+
+    // ------------------------------------------------------------------
+    // Serialization round-trip
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn config_serializes_and_deserializes() {
+        let original = Config {
+            server: ServerConfig {
+                url: "https://bd.example.com".to_string(),
+                api_token: Some("tok123".to_string()),
+                accept_invalid_certs: true,
+            },
+            tui: TuiConfig { page_size: 50 },
+        };
+
+        let toml_str = toml::to_string_pretty(&original).unwrap();
+        let parsed: Config = toml::from_str(&toml_str).unwrap();
+
+        assert_eq!(parsed.server.url, original.server.url);
+        assert_eq!(parsed.server.api_token, original.server.api_token);
+        assert_eq!(
+            parsed.server.accept_invalid_certs,
+            original.server.accept_invalid_certs
+        );
+        assert_eq!(parsed.tui.page_size, original.tui.page_size);
+    }
+
+    #[test]
+    fn config_deserializes_with_missing_page_size_uses_default() {
+        let toml_str = "[server]\nurl = \"https://bd.example.com\"\n[tui]\n";
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.tui.page_size, 100);
+    }
+
+    // ------------------------------------------------------------------
+    // Environment-variable overrides (BLACKDUCK_URL / BLACKDUCK_TOKEN)
+    // Tests that mutate process-wide env vars are serialised via ENV_LOCK.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn env_var_blackduck_url_overrides_empty() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("BLACKDUCK_URL", "https://env.example.com");
+        let cfg = Config::load().unwrap();
+        std::env::remove_var("BLACKDUCK_URL");
+        assert_eq!(cfg.server.url, "https://env.example.com");
+    }
+
+    #[test]
+    fn env_var_blackduck_token_overrides_empty() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("BLACKDUCK_TOKEN", "env_token_xyz");
+        let cfg = Config::load().unwrap();
+        std::env::remove_var("BLACKDUCK_TOKEN");
+        assert_eq!(cfg.server.api_token.as_deref(), Some("env_token_xyz"));
+    }
+
+    #[test]
+    fn env_var_accept_invalid_certs_true_values() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        for val in ["1", "true", "yes"] {
+            std::env::set_var("BLACKDUCK_ACCEPT_INVALID_CERTS", val);
+            let cfg = Config::load().unwrap();
+            std::env::remove_var("BLACKDUCK_ACCEPT_INVALID_CERTS");
+            assert!(
+                cfg.server.accept_invalid_certs,
+                "expected true for value '{val}'"
+            );
+        }
+    }
+
+    #[test]
+    fn env_var_accept_invalid_certs_false_values() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        for val in ["0", "false", "no"] {
+            std::env::set_var("BLACKDUCK_ACCEPT_INVALID_CERTS", val);
+            let cfg = Config::load().unwrap();
+            std::env::remove_var("BLACKDUCK_ACCEPT_INVALID_CERTS");
+            assert!(
+                !cfg.server.accept_invalid_certs,
+                "expected false for value '{val}'"
+            );
+        }
+    }
+}

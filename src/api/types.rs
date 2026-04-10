@@ -223,3 +223,240 @@ pub struct Link {
     pub rel: String,
     pub href: String,
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ------------------------------------------------------------------
+    // AuthToken
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn auth_token_deserializes() {
+        let json = r#"{"bearerToken":"abc123","expiresInMilliseconds":3600000}"#;
+        let token: AuthToken = serde_json::from_str(json).unwrap();
+        assert_eq!(token.bearer_token, "abc123");
+        assert_eq!(token.expires_in_milliseconds, 3_600_000);
+    }
+
+    // ------------------------------------------------------------------
+    // Project
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn project_href_returns_meta_href() {
+        let p = Project {
+            name: "MyProject".to_string(),
+            meta: Some(Meta {
+                href: "https://bd.example.com/api/projects/1".to_string(),
+                links: None,
+            }),
+            ..Project::default()
+        };
+        assert_eq!(p.href(), Some("https://bd.example.com/api/projects/1"));
+    }
+
+    #[test]
+    fn project_href_none_when_no_meta() {
+        let p = Project::default();
+        assert_eq!(p.href(), None);
+    }
+
+    #[test]
+    fn project_deserializes_with_description() {
+        let json = r#"{
+            "name": "Test",
+            "description": "A project",
+            "_meta": {"href": "https://example.com/projects/1"}
+        }"#;
+        let p: Project = serde_json::from_str(json).unwrap();
+        assert_eq!(p.name, "Test");
+        assert_eq!(p.description.as_deref(), Some("A project"));
+        assert_eq!(p.href(), Some("https://example.com/projects/1"));
+    }
+
+    #[test]
+    fn projects_response_deserializes() {
+        let json = r#"{"totalCount":1,"items":[{"name":"P1"}]}"#;
+        let resp: ProjectsResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.total_count, 1);
+        assert_eq!(resp.items.len(), 1);
+        assert_eq!(resp.items[0].name, "P1");
+    }
+
+    // ------------------------------------------------------------------
+    // ProjectVersion
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn project_version_href_returns_meta_href() {
+        let v = ProjectVersion {
+            version_name: "1.0".to_string(),
+            meta: Some(Meta {
+                href: "https://bd.example.com/api/projects/1/versions/2".to_string(),
+                links: None,
+            }),
+            ..ProjectVersion::default()
+        };
+        assert_eq!(
+            v.href(),
+            Some("https://bd.example.com/api/projects/1/versions/2")
+        );
+    }
+
+    #[test]
+    fn project_version_href_none_without_meta() {
+        assert_eq!(ProjectVersion::default().href(), None);
+    }
+
+    #[test]
+    fn project_version_deserializes() {
+        let json = r#"{
+            "versionName": "2.0",
+            "phase": "RELEASED",
+            "distribution": "EXTERNAL"
+        }"#;
+        let v: ProjectVersion = serde_json::from_str(json).unwrap();
+        assert_eq!(v.version_name, "2.0");
+        assert_eq!(v.phase.as_deref(), Some("RELEASED"));
+        assert_eq!(v.distribution.as_deref(), Some("EXTERNAL"));
+    }
+
+    // ------------------------------------------------------------------
+    // BomComponent
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn bom_component_deserializes_all_status_fields() {
+        let json = r#"{
+            "componentName": "log4j",
+            "componentVersionName": "2.14.1",
+            "reviewStatus": "REVIEWED",
+            "approvalStatus": "APPROVED",
+            "policyStatus": "IN_VIOLATION"
+        }"#;
+        let c: BomComponent = serde_json::from_str(json).unwrap();
+        assert_eq!(c.component_name, "log4j");
+        assert_eq!(c.component_version_name.as_deref(), Some("2.14.1"));
+        assert_eq!(c.review_status.as_deref(), Some("REVIEWED"));
+        assert_eq!(c.approval_status.as_deref(), Some("APPROVED"));
+        assert_eq!(c.policy_status.as_deref(), Some("IN_VIOLATION"));
+    }
+
+    #[test]
+    fn bom_component_optional_fields_absent() {
+        let json = r#"{"componentName":"minimal"}"#;
+        let c: BomComponent = serde_json::from_str(json).unwrap();
+        assert_eq!(c.component_name, "minimal");
+        assert!(c.component_version_name.is_none());
+        assert!(c.review_status.is_none());
+        assert!(c.approval_status.is_none());
+        assert!(c.policy_status.is_none());
+        assert!(c.licenses.is_none());
+    }
+
+    #[test]
+    fn components_response_deserializes() {
+        let json = r#"{"totalCount":2,"items":[{"componentName":"A"},{"componentName":"B"}]}"#;
+        let resp: ComponentsResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.total_count, 2);
+        assert_eq!(resp.items.len(), 2);
+    }
+
+    // ------------------------------------------------------------------
+    // Vulnerability / VulnerabilityDetail
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn vulnerability_deserializes_with_detail() {
+        let json = r#"{
+            "componentName": "openssl",
+            "componentVersionName": "1.0.1",
+            "vulnerabilityWithRemediation": {
+                "vulnerabilityName": "CVE-2014-0160",
+                "severity": "CRITICAL",
+                "cvss3Score": 9.8,
+                "cvss2Score": 7.5,
+                "remediationStatus": "NEEDS_REVIEW"
+            }
+        }"#;
+        let v: Vulnerability = serde_json::from_str(json).unwrap();
+        assert_eq!(v.component_name.as_deref(), Some("openssl"));
+        let detail = v.vulnerability_with_remediation.unwrap();
+        assert_eq!(detail.vulnerability_name, "CVE-2014-0160");
+        assert_eq!(detail.severity.as_deref(), Some("CRITICAL"));
+        assert!((detail.cvss3_score.unwrap() - 9.8).abs() < f64::EPSILON);
+        assert!((detail.cvss2_score.unwrap() - 7.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn vulnerability_detail_missing_scores_are_none() {
+        let json = r#"{"vulnerabilityName":"CVE-X"}"#;
+        let d: VulnerabilityDetail = serde_json::from_str(json).unwrap();
+        assert!(d.cvss3_score.is_none());
+        assert!(d.cvss2_score.is_none());
+    }
+
+    #[test]
+    fn vulnerabilities_response_deserializes() {
+        let json = r#"{"totalCount":0,"items":[]}"#;
+        let resp: VulnerabilitiesResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.total_count, 0);
+        assert!(resp.items.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // RiskCount / RiskCountEntry
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn risk_count_deserializes() {
+        let json = r#"{"counts":[{"countType":"HIGH","count":3},{"countType":"LOW","count":0}]}"#;
+        let r: RiskCount = serde_json::from_str(json).unwrap();
+        let counts = r.counts.unwrap();
+        assert_eq!(counts.len(), 2);
+        assert_eq!(counts[0].count_type, "HIGH");
+        assert_eq!(counts[0].count, 3);
+    }
+
+    // ------------------------------------------------------------------
+    // ComponentLicense / LicenseInfo
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn component_license_deserializes_license_name() {
+        let json = r#"{"licenseName":"MIT","spdxId":"MIT"}"#;
+        let lic: ComponentLicense = serde_json::from_str(json).unwrap();
+        assert_eq!(lic.license_name.as_deref(), Some("MIT"));
+        assert_eq!(lic.spdx_id.as_deref(), Some("MIT"));
+    }
+
+    #[test]
+    fn license_info_deserializes() {
+        let json = r#"{"name":"Apache-2.0","spdxId":"Apache-2.0"}"#;
+        let li: LicenseInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(li.name.as_deref(), Some("Apache-2.0"));
+    }
+
+    // ------------------------------------------------------------------
+    // Meta / Link
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn meta_deserializes_with_links() {
+        let json = r#"{
+            "href": "https://example.com/api/resource",
+            "links": [{"rel":"versions","href":"https://example.com/api/resource/versions"}]
+        }"#;
+        let m: Meta = serde_json::from_str(json).unwrap();
+        assert_eq!(m.href, "https://example.com/api/resource");
+        let links = m.links.unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].rel, "versions");
+    }
+}

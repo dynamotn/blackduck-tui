@@ -59,6 +59,10 @@ impl VersionTab {
 
 /// Which field is being edited in the filter popup
 #[derive(Debug, Clone, PartialEq, Copy)]
+#[expect(
+    clippy::enum_variant_names,
+    reason = "Status suffix is intentional: these are distinct status filter fields"
+)]
 pub enum FilterField {
     PolicyStatus,
     ReviewStatus,
@@ -68,6 +72,10 @@ pub enum FilterField {
 impl FilterField {
     pub const ALL: [Self; 3] = [Self::PolicyStatus, Self::ReviewStatus, Self::ApprovalStatus];
 
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "used by filter popup UI (not yet wired)")
+    )]
     pub fn label(self) -> &'static str {
         match self {
             Self::PolicyStatus => "Policy Status",
@@ -89,6 +97,10 @@ impl FilterField {
         }
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "used by filter popup UI (not yet wired)")
+    )]
     pub fn next(self) -> Self {
         match self {
             Self::PolicyStatus => Self::ReviewStatus,
@@ -97,6 +109,10 @@ impl FilterField {
         }
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "used by filter popup UI (not yet wired)")
+    )]
     pub fn prev(self) -> Self {
         match self {
             Self::PolicyStatus => Self::ApprovalStatus,
@@ -108,6 +124,10 @@ impl FilterField {
 
 /// Active filter values applied to component lists
 #[derive(Debug, Clone, Default)]
+#[expect(
+    clippy::struct_field_names,
+    reason = "statuses suffix is intentional: each field holds a distinct filter set"
+)]
 pub struct ComponentFilter {
     /// If non-empty, only components whose `policy_status` is in this set are shown.
     pub policy_statuses: Vec<String>,
@@ -118,6 +138,10 @@ pub struct ComponentFilter {
 }
 
 impl ComponentFilter {
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "used by filter popup UI (not yet wired)")
+    )]
     pub fn is_empty(&self) -> bool {
         self.policy_statuses.is_empty()
             && self.review_statuses.is_empty()
@@ -125,6 +149,10 @@ impl ComponentFilter {
     }
 
     /// Number of active filter criteria (for badge display).
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "used by filter badge in UI (not yet wired)")
+    )]
     pub fn active_count(&self) -> usize {
         usize::from(!self.policy_statuses.is_empty())
             + usize::from(!self.review_statuses.is_empty())
@@ -132,6 +160,10 @@ impl ComponentFilter {
     }
 
     /// Toggle a value in a filter set (add if absent, remove if present).
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "used by filter popup UI (not yet wired)")
+    )]
     pub fn toggle(set: &mut Vec<String>, value: &str) {
         if let Some(pos) = set.iter().position(|v| v == value) {
             set.remove(pos);
@@ -166,6 +198,10 @@ impl ComponentFilter {
 
 /// State for the filter popup overlay
 #[derive(Debug, Clone, Default)]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used by filter popup UI (not yet wired)")
+)]
 pub struct FilterPopup {
     pub open: bool,
     /// Which filter field row is currently highlighted
@@ -179,22 +215,38 @@ impl FilterPopup {
         FilterField::ALL[self.focused_field % FilterField::ALL.len()]
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "used by filter popup UI (not yet wired)")
+    )]
     pub fn move_field_down(&mut self) {
         self.focused_field = (self.focused_field + 1) % FilterField::ALL.len();
         self.focused_option = 0;
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "used by filter popup UI (not yet wired)")
+    )]
     pub fn move_field_up(&mut self) {
         self.focused_field =
             (self.focused_field + FilterField::ALL.len() - 1) % FilterField::ALL.len();
         self.focused_option = 0;
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "used by filter popup UI (not yet wired)")
+    )]
     pub fn move_option_down(&mut self) {
         let opts = self.current_field().options().len();
         self.focused_option = (self.focused_option + 1) % opts;
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "used by filter popup UI (not yet wired)")
+    )]
     pub fn move_option_up(&mut self) {
         let opts = self.current_field().options().len();
         self.focused_option = (self.focused_option + opts - 1) % opts;
@@ -742,8 +794,10 @@ mod tests {
 
     #[test]
     fn filter_popup_move_field_resets_focused_option() {
-        let mut p = FilterPopup::default();
-        p.focused_option = 2;
+        let mut p = FilterPopup {
+            focused_option: 2,
+            ..FilterPopup::default()
+        };
         p.move_field_down();
         assert_eq!(p.focused_option, 0);
     }

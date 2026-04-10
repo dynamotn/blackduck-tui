@@ -3,7 +3,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use tokio::sync::mpsc;
 
 use crate::api::BlackDuckClient;
-use crate::app::{App, AppEvent, ComponentFilter, Focus, Screen, StatefulList, VersionTab};
+use crate::app::{App, AppEvent, Focus, Screen, StatefulList, VersionTab};
 
 pub async fn handle_events(
     app: &mut App,
